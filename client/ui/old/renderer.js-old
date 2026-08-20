@@ -1,0 +1,34 @@
+const $ = (id) => document.getElementById(id);
+const log = (m) => {
+  $("log").textContent += `${m}\n`;
+  $("log").scrollTop = $("log").scrollHeight;
+};
+window.api.onLog(log);
+
+$("btnNew").onclick = async () => {
+  const { mnemonic } = await window.api.newWallet();
+  $("seed").value = mnemonic;
+  const { address } = await window.api.loadWallet(mnemonic);
+  $("addr").textContent = `Input[0]: ${address}`;
+  log("New wallet created. Fund the input[0] address, then mix.");
+};
+
+$("btnLoad").onclick = async () => {
+  const { address } = await window.api.loadWallet($("seed").value);
+  $("addr").textContent = `Input[0]: ${address}`;
+  const { amount } = await window.api.balance(0);
+  log(`Loaded. Balance: ${(amount / 1e6).toFixed(6)} DVPN`);
+};
+
+$("btnMix").onclick = async () => {
+  try {
+    const res = await window.api.runMix({
+      tier: $("tier").value,
+      inputIndex: Number($("inIdx").value),
+      outputIndex: Number($("outIdx").value),
+    });
+    log(`DONE. Output ${res.outputAddress} — tx ${res.txHash}`);
+  } catch (e) {
+    log(`ERROR: ${e.message || e}`);
+  }
+};

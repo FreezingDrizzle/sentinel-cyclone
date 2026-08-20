@@ -1,0 +1,246 @@
+import { app, BrowserWindow, ipcMain } from "electron";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import BlindSignature from "blind-signatures";
+import { generateMnemonic } from "bip39";
+import {
+  Secp256k1,
+  Slip10,
+  Slip10Curve,
+  stringToPath,
+  sha256,
+} from "@cosmjs/crypto";
+import { mnemonicToSeed } from "bip39";
+import { toBase64, fromBase64 } from "@cosmjs/encoding";
+import { DirectSecp256k1HdWallet, makeSignDoc } from "@cosmjs/proto-signing";
+import { StargateClient } from "@cosmjs/stargate";
+import { MsgSend } from "cosmjs-types/cosmos/bank/v1beta1/tx.js";
+import { TxBody } from "cosmjs-types/cosmos/tx/v1beta1/tx.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const PREFIX = "sent";
+const DENOM = "udvpn";
+const RPC = process.env.RPC_ENDPOINT || "https://rpc-sentinel.busurnode.com:443";
+const COORD = process.env.COORDINATOR_URL || "http://127.0.0.1:8787";
+
+// In-memory session (never persisted, never sent anywhere).
+let SEED = null;
+
+function pathFor(index) {
+  return stringToPath(`m/44'/118'/0'/0/${index}`);
+}
+
+async function privkeyAt(index) {
+  const seed = await mnemonicToSeed(SEED);
+  const { privkey } = Slip10.derivePath(
+    Slip10Curve.Secp256k1,
+    seed,
+    pathFor(index),
+  );
+  return privkey;
+}
+
+async function walletAt(index) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(SEED, {
+    prefix: PREFIX,
+    hdPaths: [pathFor(index)],
+  });
+  const [acc] = await wallet.getAccounts();
+  return { wallet, address: acc.address, pubkey: acc.pubkey };
+}
+
+async function jpost(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+  return r.json();
+}
+async function jget(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+  return r.json();
+}
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 760,
+    height: 640,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  win.loadFile(path.join(__dirname, "ui", "index.html"));
+  win.webContents.openDevTools({ mode: "detach" });
+}
+
+app.whenReady().then(createWindow);
+app.on("window-all-closed", () => app.quit());
+
+// ---- IPC handlers ----
+
+ipcMain.handle("wallet:new", async () => {
+  SEED = generateMnemonic(256);
+  return { mnemonic: SEED };
+});
+
+ipcMain.handle("wallet:load", async (_e, mnemonic) => {
+  SEED = String(mnemonic).trim();
+  const { address } = await walletAt(0);
+  return { address };
+});
+
+ipcMain.handle("wallet:address", async (_e, index) => {
+  const { address } = await walletAt(index);
+  return { address };
+});
+
+ipcMain.handle("wallet:balance", async (_e, index) => {
+  const { address } = await walletAt(index);
+  const client = await StargateClient.connect(RPC);
+  const bal = await client.getBalance(address, DENOM);
+  return { address, amount: parseInt(bal.amount, 10) };
+});
+
+ipcMain.handle("wallet:scan", async (_e, count = 10) => {
+  const client = await StargateClient.connect(RPC);
+  const rows = [];
+  let total = 0;
+  for (let i = 0; i < count; i++) {
+    const { address } = await walletAt(i);
+    const bal = await client.getBalance(address, DENOM);
+    const amount = parseInt(bal.amount, 10) || 0;
+    total += amount;
+    rows.push({ index: i, address, amount });
+  }
+  return { rows, total };
+});
+
+// Full mix flow for one participant.
+ipcMain.handle("mix:run", async (_e, { tier, inputIndex, outputIndex }) => {
+  const emit = (msg) => {
+    for (const w of BrowserWindow.getAllWindows())
+      w.webContents.send("mix:log", msg);
+  };
+
+  // 1. Fetch round params.
+  const round = await jget(`${COORD}/round/current?tier=${tier}`);
+  emit(`Round ${round.roundId} (${round.phase}), slots left: ${round.slots}`);
+
+  const input = await walletAt(inputIndex);
+  const output = await walletAt(outputIndex);
+  if (input.address === output.address)
+    throw new Error("input and output index must differ");
+
+  // 2. Sign ownership challenge with the INPUT key.
+  const priv = await privkeyAt(inputIndex);
+  const challengeHash = sha256(
+    new TextEncoder().encode(`sentinel-mix:${round.roundId}`),
+  );
+  const sig = await Secp256k1.createSignature(challengeHash, priv);
+  const ownershipSigB64 = toBase64(sig.toFixedLength().slice(0, 64));
+
+// 3. Blind our REAL output address against the round RSA key.
+const { blinded, r } = BlindSignature.blind({
+  message: output.address,
+  N: round.N,
+  E: round.E,
+});
+console.log(
+  "blinded type:",
+  typeof blinded,
+  blinded?.constructor?.name,
+); // diagnostic
+emit("Registering input (blinded output)...");
+
+const reg = await jpost(`${COORD}/register-input`, {
+  tier,
+  roundId: round.roundId,
+  inputAddress: input.address,
+  pubkeyB64: toBase64(input.pubkey),
+  ownershipSigB64,
+  blinded: String(blinded), // <-- was `blinded,` — force decimal string
+});
+  // 4. Unblind to get coordinator's signature over the real output.
+  const unblinded = BlindSignature.unblind({
+    signed: reg.blindSignature,
+    N: round.N,
+    r,
+  });
+  emit("Input accepted. Waiting for output phase...");
+
+  // 5. Wait until output phase, then register output over a FRESH request.
+  //    (Route this through a separate Tor circuit in production.)
+  await waitForPhase(round.roundId, tier, "output", emit);
+  await jpost(`${COORD}/register-output`, {
+    tier,
+    roundId: round.roundId,
+    outputAddress: output.address,
+    unblindedSig: String(unblinded),
+  });
+  emit("Output registered anonymously.");
+
+  // 6. Wait for signing phase, fetch unsigned tx, VERIFY, sign.
+  await waitForPhase(round.roundId, tier, "sign", emit);
+  const unsigned = await jget(`${COORD}/round/${round.roundId}/tx`);
+  const bodyBytes = fromBase64(unsigned.bodyBytes);
+  const authInfoBytes = fromBase64(unsigned.authInfoBytes);
+
+  verifyOutputPresent(bodyBytes, output.address, round.mixAmount);
+  emit("Verified my output is present and correct. Signing...");
+
+  const client = await StargateClient.connect(RPC);
+  const acc = await client.getAccount(input.address);
+  const signDoc = makeSignDoc(
+    bodyBytes,
+    authInfoBytes,
+    unsigned.chainId,
+    acc.accountNumber,
+  );
+  const { signature } = await input.wallet.signDirect(input.address, signDoc);
+
+  await jpost(`${COORD}/submit-signature`, {
+    roundId: round.roundId,
+    inputAddress: input.address,
+    signatureB64: signature.signature,
+  });
+  emit("Signature submitted. Waiting for broadcast...");
+
+  const final = await waitForPhase(round.roundId, tier, "done", emit, [
+    "failed",
+  ]);
+  if (final.phase === "failed") throw new Error(final.error || "round failed");
+  emit(`Broadcast! Tx: ${final.txHash}`);
+  return { txHash: final.txHash, outputAddress: output.address };
+});
+
+function verifyOutputPresent(bodyBytes, outputAddress, mixAmount) {
+  const body = TxBody.decode(bodyBytes);
+  const found = body.messages.some((m) => {
+    if (m.typeUrl !== "/cosmos.bank.v1beta1.MsgSend") return false;
+    const send = MsgSend.decode(m.value);
+    return (
+      send.toAddress === outputAddress &&
+      send.amount.some(
+        (c) => c.denom === DENOM && c.amount === String(mixAmount),
+      )
+    );
+  });
+  if (!found)
+    throw new Error("SAFETY: my output is NOT in the tx — refusing to sign");
+}
+
+async function waitForPhase(roundId, tier, target, emit, failPhases = []) {
+  for (;;) {
+    const st = await jget(`${COORD}/round/${roundId}/status`);
+    if (st.phase === target) return st;
+    if (failPhases.includes(st.phase) || st.phase === "failed") return st;
+    emit(`...phase=${st.phase} in=${st.inputs} out=${st.outputs} sig=${st.signatures}`);
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}

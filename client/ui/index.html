@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <title>Sentinel Cyclone</title>
+  </head>
+  <body>
+    <div class="sky">
+      <span class="cloud c1"></span>
+      <span class="cloud c2"></span>
+      <span class="cloud c3"></span>
+      <span class="cloud c4"></span>
+    </div>
+
+    <main>
+      <header class="brand">
+        <img class="mark" src="sentinel_cyclone.png" alt="Sentinel Cyclone icon" />
+        <div>
+          <h1>Sentinel Cyclone</h1>
+          <p class="tagline">Private, coordinated DVPN mixing</p>
+        </div>
+      </header>
+
+      <section class="glass balance-hero">
+        <div class="balance-label">Total across all addresses</div>
+        <div class="balance-value">
+          <span id="totalBal">—</span> <span class="unit">DVPN</span>
+        </div>
+        <button id="btnRefresh" class="ghost small">Refresh balances</button>
+      </section>
+
+      <section class="glass">
+        <h2>Wallet</h2>
+        <div class="row gap">
+          <button id="btnNew" class="ghost">Create new</button>
+          <button id="btnLoad" class="primary">Load seed</button>
+        </div>
+        <textarea
+          id="seed"
+          rows="2"
+          spellcheck="false"
+          placeholder="Enter your 12 / 24-word seed phrase"
+        ></textarea>
+        <div id="addr" class="mono pill hidden"></div>
+      </section>
+
+      <section class="glass">
+        <h2>Addresses</h2>
+        <div id="rows" class="table">
+          <div class="muted small pad">Load a seed to view balances.</div>
+        </div>
+      </section>
+
+      <section class="glass">
+        <h2>New Mix</h2>
+        <label class="field">
+          <span>Denomination</span>
+          <select id="tier">
+            <option value="small">100 DVPN</option>
+            <option value="medium">500 DVPN</option>
+            <option value="large">1,000 DVPN</option>
+          </select>
+        </label>
+        <div class="row gap">
+          <label class="field grow">
+            <span>Input index</span>
+            <input id="inIdx" type="number" value="0" min="0" />
+          </label>
+          <label class="field grow">
+            <span>Output index</span>
+            <input id="outIdx" type="number" value="1" min="1" />
+          </label>
+        </div>
+        <button id="btnMix" class="primary block">Start mix</button>
+      </section>
+
+      <section class="glass">
+        <h2>Send / Withdraw</h2>
+        <p class="muted small nomargin">
+          Move coins from any address index to an external wallet (e.g. Keplr,
+          which defaults to index 0).
+        </p>
+        <label class="field">
+          <span>From index</span>
+          <input id="sendIdx" type="number" value="1" min="0" />
+        </label>
+        <label class="field">
+          <span>To address</span>
+          <input id="sendTo" type="text" placeholder="sent1..." spellcheck="false" />
+        </label>
+        <div class="row gap between">
+          <label class="field grow">
+            <span>Amount (DVPN)</span>
+            <input id="sendAmt" type="number" min="0" step="0.000001" placeholder="0.000000" />
+          </label>
+          <label class="check">
+            <input id="sendMax" type="checkbox" />
+            <span>Send max</span>
+          </label>
+        </div>
+        <button id="btnSend" class="primary block">Send</button>
+      </section>
+
+      <section class="glass">
+        <h2>Activity</h2>
+        <pre id="log" class="log"></pre>
+      </section>
+    </main>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+const { contextBridge, ipcRenderer } = require("electron");
+
+contextBridge.exposeInMainWorld("api", {
+  newWallet: () => ipcRenderer.invoke("wallet:new"),
+  loadWallet: (m) => ipcRenderer.invoke("wallet:load", m),
+  address: (i) => ipcRenderer.invoke("wallet:address", i),
+  balance: (i) => ipcRenderer.invoke("wallet:balance", i),
+  scan: (count) => ipcRenderer.invoke("wallet:scan", count),
+  send: (opts) => ipcRenderer.invoke("wallet:send", opts),
+  runMix: (opts) => ipcRenderer.invoke("mix:run", opts),
+  onLog: (cb) => ipcRenderer.on("mix:log", (_e, msg) => cb(msg)),
+});

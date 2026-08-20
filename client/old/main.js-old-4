@@ -1,0 +1,406 @@
+import { app, BrowserWindow, ipcMain } from "electron";
+import path from "node:path";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { generateMnemonic, mnemonicToSeed } from "bip39";
+import {
+  Secp256k1,
+  Slip10,
+  Slip10Curve,
+  stringToPath,
+  sha256,
+} from "@cosmjs/crypto";
+import { toBase64, fromBase64, fromBech32 } from "@cosmjs/encoding";
+import { DirectSecp256k1HdWallet, makeSignDoc } from "@cosmjs/proto-signing";
+import { StargateClient, SigningStargateClient } from "@cosmjs/stargate";
+import { MsgSend } from "cosmjs-types/cosmos/bank/v1beta1/tx.js";
+import { TxBody } from "cosmjs-types/cosmos/tx/v1beta1/tx.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const PREFIX = "sent";
+const DENOM = "udvpn";
+const RPC =
+  process.env.RPC_ENDPOINT || "https://rpc-sentinel.busurnode.com:443";
+const COORD = process.env.COORDINATOR_URL || "http://127.0.0.1:8787";
+
+// Send widget gas params.
+const SEND_GAS = 200_000;
+const SEND_GAS_PRICE = 0.1;
+const SEND_FEE = Math.ceil(SEND_GAS * SEND_GAS_PRICE); // udvpn
+
+let SEED = null;
+
+// ---- Native BigInt RSA blind-signature math ----
+
+function modpow(base, exp, mod) {
+  let result = 1n;
+  base %= mod;
+  if (base < 0n) base += mod;
+  let e = exp;
+  while (e > 0n) {
+    if (e & 1n) result = (result * base) % mod;
+    e >>= 1n;
+    base = (base * base) % mod;
+  }
+  return result;
+}
+
+function egcd(a, b) {
+  let [oldR, r] = [a, b];
+  let [oldS, s] = [1n, 0n];
+  while (r !== 0n) {
+    const q = oldR / r;
+    [oldR, r] = [r, oldR - q * r];
+    [oldS, s] = [s, oldS - q * s];
+  }
+  return { g: oldR, x: oldS };
+}
+
+function modInverse(a, m) {
+  const { g, x } = egcd(((a % m) + m) % m, m);
+  if (g !== 1n) throw new Error("value not invertible mod n");
+  return ((x % m) + m) % m;
+}
+
+function gcd(a, b) {
+  let x = a;
+  let y = b;
+  while (y) [x, y] = [y, x % y];
+  return x;
+}
+
+function randBelow(n) {
+  const byteLen = (n.toString(16).length >> 1) + 8;
+  for (;;) {
+    const buf = crypto.randomBytes(byteLen);
+    const x = BigInt("0x" + buf.toString("hex")) % n;
+    if (x > 1n) return x;
+  }
+}
+
+function randCoprime(n) {
+  for (;;) {
+    const r = randBelow(n);
+    if (gcd(r, n) === 1n) return r;
+  }
+}
+
+function hashToBigInt(message, mod) {
+  const h = sha256(new TextEncoder().encode(message));
+  let hex = "";
+  for (const b of h) hex += b.toString(16).padStart(2, "0");
+  return BigInt("0x" + hex) % mod;
+}
+
+// ---- key derivation ----
+
+function pathFor(index) {
+  return stringToPath(`m/44'/118'/0'/0/${index}`);
+}
+
+async function privkeyAt(index) {
+  const seed = await mnemonicToSeed(SEED);
+  const { privkey } = Slip10.derivePath(
+    Slip10Curve.Secp256k1,
+    seed,
+    pathFor(index),
+  );
+  return privkey;
+}
+
+async function walletAt(index) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(SEED, {
+    prefix: PREFIX,
+    hdPaths: [pathFor(index)],
+  });
+  const [acc] = await wallet.getAccounts();
+  return { wallet, address: acc.address, pubkey: acc.pubkey };
+}
+
+// ---- HTTP helpers ----
+
+async function jpost(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+  return r.json();
+}
+
+async function jget(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+  return r.json();
+}
+
+// ---- Window ----
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 760,
+    height: 820,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  win.loadFile(path.join(__dirname, "ui", "index.html"));
+  // win.webContents.openDevTools({ mode: "detach" });
+}
+
+app.whenReady().then(createWindow);
+app.on("window-all-closed", () => app.quit());
+
+// ---- IPC: wallet ----
+
+ipcMain.handle("wallet:new", async () => {
+  SEED = generateMnemonic(256);
+  return { mnemonic: SEED };
+});
+
+ipcMain.handle("wallet:load", async (_e, mnemonic) => {
+  SEED = String(mnemonic).trim();
+  const { address } = await walletAt(0);
+  return { address };
+});
+
+ipcMain.handle("wallet:address", async (_e, index) => {
+  const { address } = await walletAt(index);
+  return { address };
+});
+
+ipcMain.handle("wallet:balance", async (_e, index) => {
+  const { address } = await walletAt(index);
+  const client = await StargateClient.connect(RPC);
+  const bal = await client.getBalance(address, DENOM);
+  return { address, amount: parseInt(bal.amount, 10) };
+});
+
+ipcMain.handle("wallet:scan", async (_e, count = 10) => {
+  const client = await StargateClient.connect(RPC);
+  const rows = [];
+  let total = 0;
+  for (let i = 0; i < count; i++) {
+    const { address } = await walletAt(i);
+    const bal = await client.getBalance(address, DENOM);
+    const amount = parseInt(bal.amount, 10) || 0;
+    total += amount;
+    rows.push({ index: i, address, amount });
+  }
+  return { rows, total };
+});
+
+// ---- IPC: send / withdraw from any index ----
+
+ipcMain.handle(
+  "wallet:send",
+  async (_e, { index, toAddress, amountDVPN, sendMax }) => {
+    if (SEED == null) throw new Error("load a seed first");
+
+    const to = String(toAddress || "").trim();
+    // Validate recipient bech32 + prefix.
+    try {
+      const { prefix } = fromBech32(to);
+      if (prefix !== PREFIX)
+        throw new Error(`address must start with '${PREFIX}'`);
+    } catch (err) {
+      throw new Error(`invalid recipient address: ${err.message || err}`);
+    }
+
+    const idx = Number(index);
+    if (!Number.isInteger(idx) || idx < 0)
+      throw new Error("index must be a non-negative integer");
+
+    const { wallet, address: from } = await walletAt(idx);
+    if (from === to)
+      throw new Error("source and destination address are identical");
+
+    const client = await SigningStargateClient.connectWithSigner(RPC, wallet);
+
+    const bal = parseInt((await client.getBalance(from, DENOM)).amount, 10) || 0;
+
+    const fee = {
+      amount: [{ denom: DENOM, amount: String(SEND_FEE) }],
+      gas: String(SEND_GAS),
+    };
+
+    let sendU;
+    if (sendMax) {
+      sendU = bal - SEND_FEE;
+      if (sendU <= 0)
+        throw new Error("balance too low to cover the network fee");
+    } else {
+      const asFloat = Number(amountDVPN);
+      if (!Number.isFinite(asFloat) || asFloat <= 0)
+        throw new Error("enter a valid amount");
+      sendU = Math.round(asFloat * 1e6);
+      if (sendU + SEND_FEE > bal)
+        throw new Error("insufficient balance for amount + fee");
+    }
+
+    const result = await client.sendTokens(
+      from,
+      to,
+      [{ denom: DENOM, amount: String(sendU) }],
+      fee,
+      "",
+    );
+    if (result.code !== 0)
+      throw new Error(`send failed (code ${result.code}): ${result.rawLog}`);
+
+    return {
+      txHash: result.transactionHash,
+      from,
+      to,
+      amount: sendU,
+      fee: SEND_FEE,
+    };
+  },
+);
+
+// ---- IPC: mix flow ----
+
+ipcMain.handle("mix:run", async (_e, { tier, inputIndex, outputIndex }) => {
+  const emit = (msg) => {
+    for (const w of BrowserWindow.getAllWindows())
+      w.webContents.send("mix:log", msg);
+  };
+
+  const round = await jget(`${COORD}/round/current?tier=${tier}`);
+  emit(`Round ${round.roundId} (${round.phase}), slots left: ${round.slots}`);
+
+  const input = await walletAt(inputIndex);
+  const output = await walletAt(outputIndex);
+  if (input.address === output.address)
+    throw new Error("input and output index must differ");
+
+  const priv = await privkeyAt(inputIndex);
+  const challengeHash = sha256(
+    new TextEncoder().encode(`sentinel-mix:${round.roundId}`),
+  );
+  const sig = await Secp256k1.createSignature(challengeHash, priv);
+  const ownershipSigB64 = toBase64(sig.toFixedLength().slice(0, 64));
+
+  const n = BigInt(round.N);
+  const e = BigInt(round.E);
+  const H = hashToBigInt(output.address, n);
+  const r = randCoprime(n);
+  const blinded = (H * modpow(r, e, n)) % n;
+  emit("Registering input (blinded output)...");
+
+  const reg = await jpost(`${COORD}/register-input`, {
+    tier,
+    roundId: round.roundId,
+    inputAddress: input.address,
+    pubkeyB64: toBase64(input.pubkey),
+    ownershipSigB64,
+    blinded: blinded.toString(),
+  });
+
+  const signed = BigInt(reg.blindSignature);
+  const rInv = modInverse(r, n);
+  const unblinded = (signed * rInv) % n;
+  emit("Input accepted. Waiting for output phase...");
+
+  await waitForPhase(round.roundId, tier, "output", emit);
+  await jpost(`${COORD}/register-output`, {
+    tier,
+    roundId: round.roundId,
+    outputAddress: output.address,
+    unblindedSig: unblinded.toString(),
+  });
+  emit("Output registered anonymously.");
+
+  await waitForPhase(round.roundId, tier, "sign", emit);
+  const unsigned = await jget(`${COORD}/round/${round.roundId}/tx`);
+  const bodyBytes = fromBase64(unsigned.bodyBytes);
+  const authInfoBytes = fromBase64(unsigned.authInfoBytes);
+
+  verifyTx(
+    bodyBytes,
+    output.address,
+    round.mixAmount,
+    round.fixedFee,
+    round.feeSignerAddress,
+  );
+  emit("Verified: uniform outputs, correct fee, my output present. Signing...");
+
+  const client = await StargateClient.connect(RPC);
+  const acc = await client.getAccount(input.address);
+  const signDoc = makeSignDoc(
+    bodyBytes,
+    authInfoBytes,
+    unsigned.chainId,
+    acc.accountNumber,
+  );
+  const { signature } = await input.wallet.signDirect(input.address, signDoc);
+
+  await jpost(`${COORD}/submit-signature`, {
+    roundId: round.roundId,
+    inputAddress: input.address,
+    signatureB64: signature.signature,
+  });
+  emit("Signature submitted. Waiting for broadcast...");
+
+  const final = await waitForPhase(round.roundId, tier, "done", emit, [
+    "failed",
+  ]);
+  if (final.phase === "failed") throw new Error(final.error || "round failed");
+  emit(`Broadcast! Tx: ${final.txHash}`);
+  return { txHash: final.txHash, outputAddress: output.address };
+});
+
+// ---- verification ----
+
+function verifyTx(bodyBytes, myOutput, mixAmount, fixedFee, feeSignerAddress) {
+  const body = TxBody.decode(bodyBytes);
+  const outs = [];
+  const fees = [];
+  for (const m of body.messages) {
+    if (m.typeUrl !== "/cosmos.bank.v1beta1.MsgSend")
+      throw new Error("unexpected message type in tx");
+    const s = MsgSend.decode(m.value);
+    const coin = s.amount.find((c) => c.denom === DENOM);
+    if (!coin) throw new Error("message missing denom");
+    const v = BigInt(coin.amount);
+    if (s.toAddress === feeSignerAddress) fees.push(v);
+    else outs.push({ to: s.toAddress, v });
+  }
+
+  if (outs.length === 0) throw new Error("no output messages");
+
+  const net = outs[0].v;
+  for (const o of outs)
+    if (o.v !== net) throw new Error("SAFETY: outputs are not uniform");
+
+  const fee = BigInt(fixedFee);
+  if (fees.length !== outs.length)
+    throw new Error("SAFETY: fee/output count mismatch");
+  for (const f of fees)
+    if (f !== fee) throw new Error("SAFETY: fee != advertised flat fee");
+
+  if (net + fee !== BigInt(mixAmount))
+    throw new Error("SAFETY: net + fee != mixAmount");
+
+  const mine = outs.find((o) => o.to === myOutput && o.v === net);
+  if (!mine)
+    throw new Error(
+      "SAFETY: my output missing or wrong amount — refusing to sign",
+    );
+}
+
+async function waitForPhase(roundId, tier, target, emit, failPhases = []) {
+  for (;;) {
+    const st = await jget(`${COORD}/round/${roundId}/status`);
+    if (st.phase === target) return st;
+    if (failPhases.includes(st.phase) || st.phase === "failed") return st;
+    emit(
+      `...phase=${st.phase} in=${st.inputs} out=${st.outputs} sig=${st.signatures}`,
+    );
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}
