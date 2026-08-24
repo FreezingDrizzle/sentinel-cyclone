@@ -1,10 +1,19 @@
 {
   "name": "sentinel-mixer-client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "main.js",
+  "build": {
+    "appId": "my.curio.cyclone",
+    "productName": "Cyclone",
+    "files": ["ui/**/*", "main.js", "preload.cjs"],
+    "directories": {
+      "buildResources": "build"
+    }
+  },
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build": "electron-builder"
   },
   "dependencies": {
     "@cosmjs/crypto": "^0.32.4",
@@ -15,6 +24,7 @@
     "cosmjs-types": "^0.9.0"
   },
   "devDependencies": {
-    "electron": "^31.0.0"
+    "electron": "^31.0.0",
+    "electron-builder": "^26.15.3"
   }
 }
