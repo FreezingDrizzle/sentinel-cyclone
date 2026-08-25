@@ -22,7 +22,7 @@ const PREFIX = "sent";
 const DENOM = "udvpn";
 const RPC =
   process.env.RPC_ENDPOINT || "https://rpc-sentinel.busurnode.com:443";
-const COORD = process.env.COORDINATOR_URL || "http://127.0.0.1:8787";
+const COORD = process.env.COORDINATOR_URL || "https://cyclone.curio.my:443";
 
 // Send widget gas params.
 const SEND_GAS = 200_000;
@@ -266,11 +266,35 @@ ipcMain.handle(
 
 // ---- IPC: mix flow ----
 
+const MIX_MAX_ATTEMPTS = 50;
+
+function emitAll(msg) {
+  for (const w of BrowserWindow.getAllWindows())
+    w.webContents.send("mix:log", msg);
+}
+
 ipcMain.handle("mix:run", async (_e, { tier, inputIndex, outputIndex }) => {
-  const emit = (msg) => {
-    for (const w of BrowserWindow.getAllWindows())
-      w.webContents.send("mix:log", msg);
-  };
+  for (let attempt = 1; attempt <= MIX_MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await runMixOnce({ tier, inputIndex, outputIndex, attempt });
+      return res; // success — stop mixing
+    } catch (err) {
+      emitAll(
+        `Round failed (attempt ${attempt}/${MIX_MAX_ATTEMPTS}). ` +
+          `Auto-resubmitting same input #${inputIndex} and output ` +
+          `#${outputIndex} in a new round: ${err.message || err}`,
+      );
+      await sleep(2500); // brief pause before rejoining a fresh round
+    }
+  }
+  throw new Error(
+    `Gave up mixing after ${MIX_MAX_ATTEMPTS} failed rounds — ` +
+      `no transaction was broadcast.`,
+  );
+});
+
+async function runMixOnce({ tier, inputIndex, outputIndex, attempt }) {
+  const emit = (msg) => emitAll(`[round ${attempt}] ${msg}`);
 
   const round = await jget(`${COORD}/round/current?tier=${tier}`);
   emit(`Round ${round.roundId} (${round.phase}), slots left: ${round.slots}`);
@@ -287,7 +311,7 @@ ipcMain.handle("mix:run", async (_e, { tier, inputIndex, outputIndex }) => {
     if (input.address === output.address)
       throw new Error("input and output index must differ");
 
-   const rc = await StargateClient.connect(RPC);
+    const rc = await StargateClient.connect(RPC);
     const inBal = parseInt(
       (await rc.getBalance(input.address, DENOM)).amount,
       10,
@@ -433,8 +457,6 @@ ipcMain.handle("mix:run", async (_e, { tier, inputIndex, outputIndex }) => {
     if (!submitted)
       throw new Error("gave up before a valid tx assignment was found");
 
-
-
     const final = await waitForPhase(round.roundId, tier, "done", emit, [
       "failed",
     ]);
@@ -446,7 +468,8 @@ ipcMain.handle("mix:run", async (_e, { tier, inputIndex, outputIndex }) => {
     emit(`Mix failed: ${err.message || err}`);
     throw err;
   }
-});
+}
+
 // ---- verification ----
 
 function verifyTx({
@@ -513,6 +536,7 @@ function verifyTx({
   if (!expectFee && myFee.length !== 0)
     throw new Error("SAFETY: charged a fee on a free remix — refusing to sign");
 }
+
 async function waitForPhase(roundId, tier, target, emit, failPhases = []) {
   for (;;) {
     const st = await jget(`${COORD}/round/${roundId}/status`);
