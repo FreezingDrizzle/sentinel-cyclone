@@ -274,9 +274,17 @@ function emitAll(msg) {
 }
 
 ipcMain.handle("mix:run", async (_e, { tier, inputIndex, outputIndex }) => {
+  const usedRoundIds = new Set();
+
   for (let attempt = 1; attempt <= MIX_MAX_ATTEMPTS; attempt++) {
     try {
-      const res = await runMixOnce({ tier, inputIndex, outputIndex, attempt });
+      const res = await runMixOnce({
+        tier,
+        inputIndex,
+        outputIndex,
+        attempt,
+        usedRoundIds,
+      });
       return res; // success — stop mixing
     } catch (err) {
       emitAll(
@@ -293,10 +301,32 @@ ipcMain.handle("mix:run", async (_e, { tier, inputIndex, outputIndex }) => {
   );
 });
 
-async function runMixOnce({ tier, inputIndex, outputIndex, attempt }) {
+async function fetchFreshRound(tier, usedRoundIds, emit) {
+  for (;;) {
+    const round = await jget(`${COORD}/round/current?tier=${tier}`);
+
+    if (!usedRoundIds.has(round.roundId)) return round;
+
+    emit(
+      `Round ${round.roundId} was already attempted — ` +
+        `waiting for the coordinator to open a fresh round before rejoining...`,
+    );
+    await sleep(5000);
+  }
+}
+
+async function runMixOnce({
+  tier,
+  inputIndex,
+  outputIndex,
+  attempt,
+  usedRoundIds,
+}) {
   const emit = (msg) => emitAll(`[round ${attempt}] ${msg}`);
 
-  const round = await jget(`${COORD}/round/current?tier=${tier}`);
+  const round = await fetchFreshRound(tier, usedRoundIds, emit);
+  usedRoundIds.add(round.roundId);
+
   emit(`Round ${round.roundId} (${round.phase}), slots left: ${round.slots}`);
 
   if (!round.feeSignerAddress || round.fixedFee == null)
