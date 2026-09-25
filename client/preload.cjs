@@ -8,5 +8,6 @@ contextBridge.exposeInMainWorld("api", {
   scan: (count) => ipcRenderer.invoke("wallet:scan", count),
   send: (opts) => ipcRenderer.invoke("wallet:send", opts),
   runMix: (opts) => ipcRenderer.invoke("mix:run", opts),
+  fetchTiers: () => ipcRenderer.invoke("mix:tiers"),
   onLog: (cb) => ipcRenderer.on("mix:log", (_e, msg) => cb(msg)),
 });

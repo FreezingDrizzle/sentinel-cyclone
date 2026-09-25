@@ -216,7 +216,7 @@ button.small { padding: 7px 14px; font-size: 12.5px; }
 .table { display: flex; flex-direction: column; gap: 8px; }
 .trow {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   gap: 12px;
   align-items: center;
   padding: 10px 12px;
@@ -235,6 +235,25 @@ button.small { padding: 7px 14px; font-size: 12.5px; }
 .trow .addr { font-size: 12px; color: var(--muted); }
 .trow .amt { font-weight: 600; }
 .trow .amt.zero { color: var(--muted); font-weight: 500; }
+
+.copy-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--muted);
+  padding: 2px 4px;
+  border-radius: 5px;
+  line-height: 1;
+  transition: color 0.15s, background 0.15s;
+}
+.copy-btn:hover {
+  color: var(--accent);
+  background: rgba(110, 168, 255, 0.12);
+}
+.copy-btn:active {
+  color: var(--good);
+}
 
 .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 .muted { color: var(--muted); }

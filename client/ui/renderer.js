@@ -28,6 +28,36 @@ function shortAddr(a) {
   return a.length > 18 ? `${a.slice(0, 10)}…${a.slice(-6)}` : a;
 }
 
+// ---- Fetch tiers from coordinator and populate dropdown ----
+let TIER_DATA = {};
+let FIXED_FEE = 0;
+
+async function loadTiers() {
+  try {
+    const data = await window.api.fetchTiers();
+    TIER_DATA = data.tiers;
+    FIXED_FEE = data.fixedFee;
+    const sel = $("tier");
+    sel.innerHTML = "";
+    for (const [key, cfg] of Object.entries(data.tiers)) {
+      const dvpn = toDVPN(cfg.mixAmount);
+      const opt = document.createElement("option");
+      opt.value = key;
+      opt.textContent = `${dvpn} DVPN`;
+      sel.appendChild(opt);
+    }
+    // Select the first tier by default.
+    if (sel.options.length > 0) sel.options[0].selected = true;
+    $("tierFee").value = `${toDVPN(data.fixedFee)} DVPN`;
+    log(`Coordinator fee: ${toDVPN(data.fixedFee)} DVPN`);
+  } catch (e) {
+    log(`WARNING: could not fetch tiers from coordinator: ${e.message || e}`);
+    // Fallback: keep "Loading…" placeholder.
+  }
+}
+
+loadTiers();
+
 async function refreshBalances() {
   $("totalBal").textContent = "…";
   try {
@@ -42,6 +72,7 @@ async function refreshBalances() {
       div.innerHTML = `
         <span class="idx">#${r.index}</span>
         <span class="addr mono">${shortAddr(r.address)}</span>
+        <button class="copy-btn" title="Copy full address" data-addr="${r.address}">⧉</button>
         <span class="amt ${zero}">${toDVPN(r.amount)} DVPN</span>`;
       $("rows").appendChild(div);
     }
@@ -78,17 +109,52 @@ $("btnLoad").onclick = async () => {
 
 $("btnRefresh").onclick = refreshBalances;
 
-$("btnMix").onclick = async () => {
+// Delegate copy-button clicks inside the addresses table.
+$("rows").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".copy-btn");
+  if (!btn) return;
+  const addr = btn.dataset.addr;
+  if (!addr) return;
   try {
+    await navigator.clipboard.writeText(addr);
+    // Brief visual feedback.
+    const orig = btn.textContent;
+    btn.textContent = "✓";
+    btn.style.color = "var(--good)";
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.style.color = "";
+    }, 1200);
+  } catch (err) {
+    log(`Copy failed: ${err.message || err}`);
+  }
+});
+
+$("btnMix").onclick = async () => {
+  const btn = $("btnMix");
+  btn.disabled = true;
+  try {
+    const tierKey = $("tier").value;
+    const tierCfg = TIER_DATA[tierKey];
+    const mixAmt = tierCfg ? toDVPN(tierCfg.mixAmount) : "?";
+    const feeAmt = toDVPN(FIXED_FEE);
+    const inIdx = Number($("inIdx").value);
+    const outIdx = Number($("outIdx").value);
+    log(
+      `Starting mix: ${mixAmt} DVPN from #${inIdx} → #${outIdx} ` +
+        `(coordinator fee ${feeAmt} DVPN)`,
+    );
     const res = await window.api.runMix({
-      tier: $("tier").value,
-      inputIndex: Number($("inIdx").value),
-      outputIndex: Number($("outIdx").value),
+      tier: tierKey,
+      inputIndex: inIdx,
+      outputIndex: outIdx,
     });
     log(`DONE. Output ${res.outputAddress} — tx ${res.txHash}`);
     await refreshBalances();
   } catch (e) {
     log(`ERROR: ${e.message || e}`);
+  } finally {
+    btn.disabled = false;
   }
 };
 

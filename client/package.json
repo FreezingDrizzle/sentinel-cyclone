@@ -1,25 +1,36 @@
 {
   "name": "sentinel-mixer-client",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "main": "main.js",
   "build": {
     "appId": "my.curio.cyclone",
-    "productName": "Cyclone",
-    "files": ["ui/**/*", "main.js", "preload.cjs"],
+    "productName": "Cyclone-Sentinel",
+    "files": [
+      "ui/**/*",
+      "assets/**/*",
+      "main.js",
+      "preload.cjs"
+    ],
     "directories": {
       "buildResources": "build"
     },
     "win": {
-    "icon": "assets/icon.ico"
-   }
+      "icon": "assets/icon.ico"
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "target": ["AppImage"],
+      "category": "Network"
+    }
   },
   "scripts": {
     "start": "electron .",
     "build": "electron-builder",
     "build:win": "electron-builder --win dir",
     "build:win-portable": "electron-builder --win portable",
-    "build:win-installer": "electron-builder --win nsis"
+    "build:win-installer": "electron-builder --win nsis",
+    "build:linux": "electron-builder --linux"
   },
   "dependencies": {
     "@cosmjs/crypto": "^0.32.4",
@@ -27,6 +38,7 @@
     "@cosmjs/proto-signing": "^0.32.4",
     "@cosmjs/stargate": "^0.32.4",
     "bip39": "^3.1.0",
+    "blake2": "^5.0.1",
     "cosmjs-types": "^0.9.0"
   },
   "devDependencies": {

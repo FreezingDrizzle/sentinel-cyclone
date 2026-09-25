@@ -273,6 +273,12 @@ function emitAll(msg) {
     w.webContents.send("mix:log", msg);
 }
 
+ipcMain.handle("mix:tiers", async () => {
+  const resp = await fetch(`${COORD}/tiers`);
+  if (!resp.ok) throw new Error(`tiers endpoint returned ${resp.status}`);
+  return resp.json();
+});
+
 ipcMain.handle("mix:run", async (_e, { tier, inputIndex, outputIndex }) => {
   const usedRoundIds = new Set();
 
@@ -327,7 +333,10 @@ async function runMixOnce({
   const round = await fetchFreshRound(tier, usedRoundIds, emit);
   usedRoundIds.add(round.roundId);
 
-  emit(`Round ${round.roundId} (${round.phase}), slots left: ${round.slots}`);
+  emit(
+  `Round ${round.roundId} (${round.phase}), ${round.slots} slot(s) left` +
+    ` — coordinator fee: ${(Number(round.fixedFee) / 1e6).toFixed(6)} DVPN`,
+);
 
   if (!round.feeSignerAddress || round.fixedFee == null)
     throw new Error(
@@ -360,7 +369,11 @@ async function runMixOnce({
           `has ${(inBal / 1e6).toFixed(6)}`,
       );
     }
-    emit(expectFee ? "First-round mix (fee applies)." : "Free remix.");
+    emit(
+      expectFee
+        ? `First-round mix (fee applies — ${(flat / 1e6).toFixed(6)} DVPN coordinator fee)`
+        : "Free remix.",
+    );
 
     const priv = await privkeyAt(inputIndex);
     const challengeHash = sha256(
